@@ -6,24 +6,69 @@ typedef struct {
 
 PDEVICE_OBJECT keyboardExtension = NULL;
 
+typedef struct _KEYBOARD_INPUT_DATA {
+	USHORT UnitId;
+	USHORT MakeCode;
+	USHORT Flags;
+	USHORT Reserved;
+	ULONG  ExtraInformation;
+} KEYBOARD_INPUT_DATA, * PKEYBOARD_INPUT_DATA;
+
+ULONG pendingIrp = 0;
+
 
 VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 {
 	PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
-	IoDetachDevice(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension);
+	IoDetachDevice(
+		((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension
+	);
 	IoDeleteDevice(keyboardExtension);
+
+	LARGE_INTEGER interval = { 0 };
+	interval.QuadPart = -10 * 1000 * 1000;
+
+	while (pendingIrp) {
+		KeDelayExecutionThread(KernelMode, FALSE, &interval);
+	}
 
 	DbgPrint("kbScanner: Driver unloaded\n");
 }
 
-NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP pirp)
+NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	return STATUS_SUCCESS;
+	// Just pass IRP
+	IoCopyCurrentIrpStackLocationToNext(Irp);
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
 }
 
-NTSTATUS DispatchRead(PDEVICE_OBJECT DeviceObject, PIRP pirp)
+NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	return STATUS_SUCCESS;
+	PKEYBOARD_INPUT_DATA keys = (PKEYBOARD_INPUT_DATA)Irp->AssociatedIrp.SystemBuffer;
+
+	int keysData = Irp->IoStatus.Information / sizeof(KEYBOARD_INPUT_DATA);
+	if (Irp->IoStatus.Status == STATUS_SUCCESS)
+	{
+		for (int i = 0; i < keysData; i++) {
+			DbgPrint("kbScanner: Scan code is %x\n", keys[i].MakeCode);
+		}
+	}
+
+	if (Irp->PendingReturned) {
+		IoMarkIrpPending(Irp);
+	}
+
+	pendingIrp--;
+	return Irp->IoStatus.Status;
+}
+
+NTSTATUS DispatchRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	IoCopyCurrentIrpStackLocationToNext(Irp);
+	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE)ReadKeys, NULL, TRUE, TRUE, TRUE);
+
+	pendingIrp++;
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
 }
 
 NTSTATUS MyAttachDevice(PDRIVER_OBJECT DriverObject)
