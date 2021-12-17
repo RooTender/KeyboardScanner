@@ -1,5 +1,12 @@
 #include <ntddk.h>
 
+#define DEVICE_SEND		CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_WRITE_DATA)
+#define DEVICE_RECIEVE	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardScanner");
+UNICODE_STRING SymLinkName = RTL_CONSTANT_STRING(L"\\??\\keyboardscanner");
+PDEVICE_OBJECT DeviceObject = NULL;
+
 typedef struct {
 	PDEVICE_OBJECT lowerKeyboardExtension;
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
@@ -19,6 +26,11 @@ ULONG pendingIrp = 0;
 
 VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 {
+	// Remove device
+	IoDeleteSymbolicLink(&SymLinkName);
+	IoDeleteDevice(DeviceObject);
+
+	// Detach keyboard
 	PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
 	IoDetachDevice(
 		((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension
@@ -37,9 +49,42 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 
 NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
+	Irp->IoStatus.Information = 0;
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return STATUS_SUCCESS;
+
+	/*PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+
+	DbgPrint("kbScanner: Major code %x\n", irpStack->MajorFunction);
+	switch (irpStack->MajorFunction)
+	{
+	case IRP_MJ_CREATE:
+		DbgPrint("kbScanner: Connection estabilished\n");
+
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_SUCCESS;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+		return STATUS_SUCCESS;
+
+	case IRP_MJ_CLOSE:
+		DbgPrint("kbScanner: Connection closed\n");
+
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_SUCCESS;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+		return STATUS_SUCCESS;
+
+	default:
+		break;
+	}
+
 	// Just pass IRP
 	IoCopyCurrentIrpStackLocationToNext(Irp);
-	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);*/
 }
 
 NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -70,6 +115,42 @@ NTSTATUS DispatchRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	pendingIrp++;
 	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
 }
+
+NTSTATUS DispatchControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+	NTSTATUS status = STATUS_SUCCESS;
+
+	PVOID buffer = Irp->AssociatedIrp.SystemBuffer;
+	ULONG inLength = irpStack->Parameters.DeviceIoControl.InputBufferLength;
+	ULONG outLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+
+	ULONG answer = 0;
+
+	WCHAR* keyboardData = L"0001";
+
+	switch (irpStack->Parameters.DeviceIoControl.IoControlCode) {
+	case DEVICE_SEND:
+		answer = (wcsnlen(buffer, 4) + 1) * 2;
+		break;
+
+	case DEVICE_RECIEVE:
+		wcsncpy(buffer, keyboardData, 4);
+		answer = (wcsnlen(buffer, 4) + 1) * 2;
+		break;
+
+	default:
+		status = STATUS_INVALID_PARAMETER;
+		break;
+	}
+
+	Irp->IoStatus.Status = status;
+	Irp->IoStatus.Information = answer;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return status;
+}
+
 
 NTSTATUS MyAttachDevice(PDRIVER_OBJECT DriverObject)
 {
@@ -110,11 +191,37 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	NTSTATUS status;
 	DriverObject->DriverUnload = DriverUnload;
 
+	// Create new device for communication with our app
+	status = IoCreateDevice(DriverObject, 0, &DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &DeviceObject);
+
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("kbScanner: Failed to create device\n");
+		return status;
+	}
+	else {
+		DbgPrint("kbScanner: Device successfully initialized\n");
+	}
+
+	status = IoCreateSymbolicLink(&SymLinkName, &DeviceName);
+
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("kbScanner: Failed creating symbolic link\n");
+		return status;
+	}
+	else {
+		DbgPrint("kbScanner: Symbolic link successfully created\n");
+	}
+
 	for (int i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
 		DriverObject->MajorFunction[i] = DispatchPass;
 	}
 
+	// This request is sent by I/O manager
+	// For instance when keyboard or mouse key is clicked
 	DriverObject->MajorFunction[IRP_MJ_READ] = DispatchRead;
+
+	// Respond to device control
+	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchControl;
 
 	status = MyAttachDevice(DriverObject);
 	if (!NT_SUCCESS(status)) {
@@ -122,7 +229,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		return status;
 	}
 	else {
-		DbgPrint("kbScanner: Successfully initialized\n");
+		DbgPrint("kbScanner: Driver successfully attached to keyboard\n");
 	}
 
 	return STATUS_SUCCESS;
