@@ -3,9 +3,10 @@
 UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardScanner");
 
 typedef struct {
-	PDEVICE_OBJECT lowerKeyboardExtension;
+	PDEVICE_OBJECT lowerDevice;
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
 
+// Keyboard Extension
 PDEVICE_OBJECT keyboardExtension = NULL;
 
 typedef struct _KEYBOARD_INPUT_DATA {
@@ -16,6 +17,25 @@ typedef struct _KEYBOARD_INPUT_DATA {
 	ULONG  ExtraInformation;
 } KEYBOARD_INPUT_DATA, * PKEYBOARD_INPUT_DATA;
 
+// Mouse Extension
+PDEVICE_OBJECT mouseExtension = NULL;
+
+typedef struct _MOUSE_INPUT_DATA {
+	USHORT UnitId;
+	USHORT Flags;
+	union {
+		ULONG Buttons;
+		struct {
+			USHORT ButtonFlags;
+			USHORT ButtonData;
+		};
+	};
+	ULONG  RawButtons;
+	LONG   LastX;
+	LONG   LastY;
+	ULONG  ExtraInformation;
+} MOUSE_INPUT_DATA, * PMOUSE_INPUT_DATA;
+
 ULONG pendingIrp = 0;
 
 
@@ -24,7 +44,7 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 	// Detach keyboard
 	PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
 	IoDetachDevice(
-		((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension
+		((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerDevice
 	);
 	IoDeleteDevice(keyboardExtension);
 
@@ -42,54 +62,7 @@ NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
 	// Just pass IRP
 	IoCopyCurrentIrpStackLocationToNext(Irp);
-	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
-}
-
-VOID moveMouse(USHORT code)
-{
-	PUCHAR signalPortPointer = (PUCHAR)0x64;
-	PUCHAR mousePortPointer = (PUCHAR)0x60;
-
-	UCHAR startSignal = 0xD3;
-	UCHAR flagByte = 0x08;
-
-	UCHAR moveX = 0;
-	UCHAR moveY = 0;
-
-	UCHAR step = 1;
-	DbgPrint("kbScanner: Scan code %d\n", code);
-	
-	switch (code) {
-	case 72:	// UP
-		moveX++;
-		moveX *= step;
-		break;
-
-	case 80:	// DOWN
-		moveY++;
-		moveY *= step;
-		break;
-
-	case 75:
-		flagByte |= 0x10;
-		moveX = -moveX;
-		break;
-
-	case 77:
-		flagByte |= 0x20;
-		moveY = -moveY;
-		break;
-
-	default:
-		break;
-	}
-
-	WRITE_PORT_UCHAR(signalPortPointer, startSignal);
-	WRITE_PORT_UCHAR(mousePortPointer, flagByte);
-	WRITE_PORT_UCHAR(signalPortPointer, startSignal);
-	WRITE_PORT_UCHAR(mousePortPointer, moveX);
-	WRITE_PORT_UCHAR(signalPortPointer, startSignal);
-	WRITE_PORT_UCHAR(mousePortPointer, moveY);
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerDevice, Irp);
 }
 
 NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -123,23 +96,79 @@ NTSTATUS DispatchRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE)ReadKeys, NULL, TRUE, TRUE, TRUE);
 
 	pendingIrp++;
-	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerDevice, Irp);
 }
 
-NTSTATUS MyAttachDevice(PDRIVER_OBJECT DriverObject)
+NTSTATUS MoveMouse(PDEVICE_OBJECT DeviceObject, ULONG IoctlControlCode)
 {
-	UNICODE_STRING targetDevice = RTL_CONSTANT_STRING(L"\\Device\\KeyboardClass0");
-
+	KEVENT              event;
+	PIRP                irp;
+	IO_STATUS_BLOCK     ioStatus;
 	NTSTATUS status;
-	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), NULL, FILE_DEVICE_KEYBOARD, 0, FALSE, &keyboardExtension);
 
+	char OutBuf[1024];
+	ULONG OutBufLen = 1024;
+	char InBuf[1024];
+	ULONG InBufLen = 1024;
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+	if (NULL == irp) {
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	status = IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerDevice, irp);
+
+	if (status == STATUS_PENDING) {
+		// 
+		// You must wait here for the IRP to be completed because:
+		// 1) The IoBuildDeviceIoControlRequest associates the IRP with the
+		//     thread and if the thread exits for any reason, it would cause the IRP
+		//     to be canceled. 
+		// 2) The Event and IoStatus block memory is from the stack and we
+		//     cannot go out of scope.
+		// This event will be signaled by the I/O manager when the
+		// IRP is completed.
+		// 
+		status = KeWaitForSingleObject(
+			&event,
+			Executive, // wait reason
+			KernelMode, // To prevent stack from being paged out.
+			FALSE,     // You are not alertable
+			NULL);     // No time out !!!!
+
+		status = ioStatus.Status;
+	}
+
+	return status;
+}
+
+/*	IoCopyCurrentIrpStackLocationToNext(Irp);
+	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE)ReadKeys, NULL, TRUE, TRUE, TRUE);
+
+	pendingIrp++;
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerDevice, Irp);
+}*/
+
+NTSTATUS MyAttachDevices(PDRIVER_OBJECT DriverObject)
+{
+	UNICODE_STRING keyboardDevice = RTL_CONSTANT_STRING(L"\\Device\\KeyboardClass0");
+	UNICODE_STRING mouseDevice = RTL_CONSTANT_STRING(L"\\Device\\PointerClass0");
+	NTSTATUS status;
+
+	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), NULL, FILE_DEVICE_KEYBOARD, 0, FALSE, &keyboardExtension);
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
 
-	// This extension will ONLY read existing keyboard buffer
-	// Do not initialize keyboard again!
-	keyboardExtension->Flags |= DO_BUFFERED_IO;
+	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), NULL, FILE_DEVICE_MOUSE, 0, FALSE, &mouseExtension);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+
+	// Use buffered IO for better performance
+	// Signal that our driver is about to start
+	keyboardExtension->Flags |= DO_BUFFERED_IO;				
 	keyboardExtension->Flags &= ~DO_DEVICE_INITIALIZING;
 
 	// Reset memory of this extension
@@ -148,12 +177,25 @@ NTSTATUS MyAttachDevice(PDRIVER_OBJECT DriverObject)
 	// Attach device extension to keyboard
 	IoAttachDevice(
 		keyboardExtension, 
-		&targetDevice, 
-		&((PDEVICE_EXTENSION)keyboardExtension->DeviceExtension)->lowerKeyboardExtension
+		&keyboardDevice,
+		&((PDEVICE_EXTENSION)keyboardExtension->DeviceExtension)->lowerDevice
 	);
-
 	if (!NT_SUCCESS(status)) {
 		IoDeleteDevice(keyboardExtension);
+		return status;
+	}
+
+	mouseExtension->Flags |= DO_BUFFERED_IO;
+	mouseExtension->Flags &= ~DO_DEVICE_INITIALIZING;
+
+	// Attach device extension to mouse
+	IoAttachDevice(
+		mouseExtension,
+		&mouseDevice,
+		&((PDEVICE_EXTENSION)mouseExtension->DeviceExtension)->lowerDevice
+	);
+	if (!NT_SUCCESS(status)) {
+		IoDeleteDevice(mouseExtension);
 		return status;
 	}
 
@@ -170,10 +212,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	}
 
 	// This request is sent by I/O manager
-	// For instance when keyboard or mouse key is clicked
+	// For instance when keyboard key is clicked
 	DriverObject->MajorFunction[IRP_MJ_READ] = DispatchRead;
 
-	status = MyAttachDevice(DriverObject);
+	// For instance when keyboard key is clicked
+	DriverObject->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] = MoveMouse;
+
+	status = MyAttachDevices(DriverObject);
 	if (!NT_SUCCESS(status)) {
 		DbgPrint("kbScanner: Failed to attach device\n");
 		return status;
