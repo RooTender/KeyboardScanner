@@ -1,7 +1,6 @@
 #include <ntddk.h>
 
-#define DEVICE_SEND		CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_WRITE_DATA)
-#define DEVICE_RECIEVE	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_WRITE_DATA)
+#define DEVICE_READ		CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_READ_DATA)
 
 UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardScanner");
 UNICODE_STRING SymLinkName = RTL_CONSTANT_STRING(L"\\??\\keyboardscanner");
@@ -49,42 +48,17 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 
 NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	Irp->IoStatus.Information = 0;
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-	return STATUS_SUCCESS;
-
-	/*PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
-
-	DbgPrint("kbScanner: Major code %x\n", irpStack->MajorFunction);
-	switch (irpStack->MajorFunction)
-	{
-	case IRP_MJ_CREATE:
-		DbgPrint("kbScanner: Connection estabilished\n");
-
+	if (DeviceObject->Type == FILE_DEVICE_UNKNOWN) {
 		Irp->IoStatus.Information = 0;
 		Irp->IoStatus.Status = STATUS_SUCCESS;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 		return STATUS_SUCCESS;
-
-	case IRP_MJ_CLOSE:
-		DbgPrint("kbScanner: Connection closed\n");
-
-		Irp->IoStatus.Information = 0;
-		Irp->IoStatus.Status = STATUS_SUCCESS;
-		IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-		return STATUS_SUCCESS;
-
-	default:
-		break;
 	}
 
 	// Just pass IRP
 	IoCopyCurrentIrpStackLocationToNext(Irp);
-	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);*/
+	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
 }
 
 NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -125,27 +99,18 @@ NTSTATUS DispatchControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	ULONG inLength = irpStack->Parameters.DeviceIoControl.InputBufferLength;
 	ULONG outLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
 
-	ULONG answer = 0;
-
+	ULONG message = 0;
 	WCHAR* keyboardData = L"0001";
 
-	switch (irpStack->Parameters.DeviceIoControl.IoControlCode) {
-	case DEVICE_SEND:
-		answer = (wcsnlen(buffer, 4) + 1) * 2;
-		break;
-
-	case DEVICE_RECIEVE:
-		wcsncpy(buffer, keyboardData, 4);
-		answer = (wcsnlen(buffer, 4) + 1) * 2;
-		break;
-
-	default:
+	if (irpStack->Parameters.DeviceIoControl.IoControlCode == DEVICE_READ) {
+		message = (wcsnlen(buffer, 4) + 1) * 2;
+	}
+	else {
 		status = STATUS_INVALID_PARAMETER;
-		break;
 	}
 
 	Irp->IoStatus.Status = status;
-	Irp->IoStatus.Information = answer;
+	Irp->IoStatus.Information = message;
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	return status;
