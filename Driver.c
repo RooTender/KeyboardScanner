@@ -48,17 +48,17 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 
 NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	if (DeviceObject->Type == FILE_DEVICE_UNKNOWN) {
-		Irp->IoStatus.Information = 0;
-		Irp->IoStatus.Status = STATUS_SUCCESS;
-		IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-		return STATUS_SUCCESS;
+	if (DeviceObject->Type == FILE_DEVICE_KEYBOARD) {
+		// Just pass IRP
+		IoCopyCurrentIrpStackLocationToNext(Irp);
+		return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
 	}
 
-	// Just pass IRP
-	IoCopyCurrentIrpStackLocationToNext(Irp);
-	return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->lowerKeyboardExtension, Irp);
+	Irp->IoStatus.Information = 0;
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -103,7 +103,8 @@ NTSTATUS DispatchControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	WCHAR* keyboardData = L"0001";
 
 	if (irpStack->Parameters.DeviceIoControl.IoControlCode == DEVICE_READ) {
-		message = (wcsnlen(buffer, 4) + 1) * 2;
+		wcsncpy(buffer, keyboardData, 63);
+		message = (wcsnlen(buffer, 63) + 1) * 2;
 	}
 	else {
 		status = STATUS_INVALID_PARAMETER;
