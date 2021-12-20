@@ -21,6 +21,7 @@ typedef struct _KEYBOARD_INPUT_DATA {
 } KEYBOARD_INPUT_DATA, * PKEYBOARD_INPUT_DATA;
 
 ULONG pendingIrp = 0;
+WCHAR* keyboardData = L"0";
 
 
 VOID DriverUnload(PDRIVER_OBJECT DriverObject)
@@ -69,7 +70,36 @@ NTSTATUS ReadKeys(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	if (Irp->IoStatus.Status == STATUS_SUCCESS)
 	{
 		for (int i = 0; i < keysData; i++) {
-			DbgPrint("kbScanner: Scan code is %x\n", keys[i].MakeCode);
+			DbgPrint("kbScanner: Flag code %x\n", keys[i].Flags);
+
+			// If special key (like arrow) is pressed
+			if (keys[i].Flags == 2) {
+				switch (keys[i].MakeCode) {
+				case 72:	// UP
+					keyboardData = L"1";
+					break;
+
+				case 80:	// DOWN
+					keyboardData = L"2";
+					break;
+
+				case 75:	// LEFT
+					keyboardData = L"3";
+					break;
+
+				case 77:	// RIGHT
+					keyboardData = L"4";
+					break;
+
+				default:	// Different special key was pressed
+					keyboardData = L"0";
+					break;
+				}
+			}
+			else {
+				keyboardData = L"0";
+				break;
+			}
 		}
 	}
 
@@ -100,11 +130,10 @@ NTSTATUS DispatchControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	ULONG outLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
 
 	ULONG message = 0;
-	WCHAR* keyboardData = L"0001";
-
+	
 	if (irpStack->Parameters.DeviceIoControl.IoControlCode == DEVICE_READ) {
-		wcsncpy(buffer, keyboardData, 63);
-		message = (wcsnlen(buffer, 63) + 1) * 2;
+		wcsncpy(buffer, keyboardData, 1);
+		message = (wcsnlen(buffer, 1) + 1) * 2;
 	}
 	else {
 		status = STATUS_INVALID_PARAMETER;
